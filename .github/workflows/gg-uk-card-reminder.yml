@@ -1,0 +1,47 @@
+name: GG UK Card SMS Reminder
+
+on:
+  schedule:
+    # Beijing time 12:00 and 20:00.
+    - cron: "0 4,12 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Send immediately, ignoring the 5-month schedule"
+        required: true
+        type: boolean
+        default: true
+      dry_run:
+        description: "Check logic without sending Bark notification"
+        required: true
+        type: boolean
+        default: false
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Send Bark reminder
+        env:
+          BARK_KEY: ${{ secrets.BARK_KEY }}
+          BARK_BASE: "https://api.day.app"
+          BARK_TITLE: "GG 英国卡短信保活提醒"
+          BARK_GROUP: "gg-uk-card"
+          BARK_BODY: "GG 英国卡需要发短信保活。申请日期：5月27；请今天安排发一条短信。当前北京时间：{now}。"
+          SCHEDULE_TYPE: "month_interval"
+          START_DATE: "2026-11-01"
+          INTERVAL_MONTHS: "5"
+          TIMEZONE: "Asia/Shanghai"
+          FORCE_SEND: ${{ github.event_name == 'workflow_dispatch' && inputs.force == true }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run == true }}
+        run: python scripts/send_bark.py
