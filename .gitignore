@@ -6,3 +6,4 @@ haxlogin.session
 session_string.txt
 phone_code_hash.json
 __pycache__/
+cf-worker/.wrangler/
