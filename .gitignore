@@ -1,0 +1,8 @@
+# 本地登录辅助文件，含凭据，严禁提交
+login_step1.py
+login_step2.py
+peek_messages.py
+haxlogin.session
+session_string.txt
+phone_code_hash.json
+__pycache__/
