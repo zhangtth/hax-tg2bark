@@ -14,10 +14,15 @@ BOT = "HaxTG_bot"
 STATE_FILE = "state.json"
 
 
+def recovery_notify_after():
+    try:
+        return max(1, int(os.getenv("RECOVERY_NOTIFY_AFTER", "1")))
+    except ValueError:
+        return 1
+
+
 def bark(title, body, level="active"):
-    payload = {"title": title, "body": body, "group": "hax", "level": level}
-    if level == "critical":
-        payload["volume"] = 8
+    payload = {"title": title, "body": body, "group": "hax", "level": "passive"}
     req = urllib.request.Request(
         f"https://api.day.app/{BARK_KEY}",
         data=json.dumps(payload).encode(),
@@ -25,6 +30,15 @@ def bark(title, body, level="active"):
     )
     with urllib.request.urlopen(req, timeout=10) as resp:
         resp.read()
+
+
+def safe_bark(title, body, level="active"):
+    try:
+        bark(title, body, level)
+        return True
+    except Exception as exc:
+        print(f"Failed to send Bark notification: {exc}")
+        return False
 
 
 def classify(text):
@@ -38,9 +52,25 @@ def classify(text):
     return "HAX 通知", "active"
 
 
+def load_state():
+    try:
+        with open(STATE_FILE) as f:
+            state = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        state = {}
+    state.setdefault("last_id", 0)
+    state.setdefault("consecutive_failures", 0)
+    state.setdefault("failure_notified", False)
+    return state
+
+
+def save_state(state):
+    with open(STATE_FILE, "w") as f:
+        json.dump(state, f)
+
+
 async def main():
-    with open(STATE_FILE) as f:
-        state = json.load(f)
+    state = load_state()
     last_id = state["last_id"]
 
     client = TelegramClient(StringSession(SESSION), API_ID, API_HASH)
@@ -51,14 +81,22 @@ async def main():
     msgs = [m async for m in client.iter_messages(BOT, min_id=last_id) if m.text]
     await client.disconnect()
 
+    previous_failures = state.get("consecutive_failures", 0)
+    if previous_failures >= recovery_notify_after():
+        safe_bark(
+            "HAX 监控已恢复",
+            f"GitHub Actions 连续失败 {previous_failures} 次后已恢复连接。",
+        )
+
     for m in reversed(msgs):
         title, level = classify(m.text)
-        bark(title, m.text, level)
+        safe_bark(title, m.text, level)
         last_id = max(last_id, m.id)
 
     state["last_id"] = last_id
-    with open(STATE_FILE, "w") as f:
-        json.dump(state, f)
+    state["consecutive_failures"] = 0
+    state["failure_notified"] = False
+    save_state(state)
     print(f"done: {len(msgs)} new message(s), last_id={last_id}")
 
 
@@ -66,8 +104,17 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except Exception as e:
-        try:
-            bark("HAX 监控失效", f"GitHub Actions 出错，请检查：{e}", "critical")
-        except Exception:
-            pass
-        raise
+        state = load_state()
+        state["consecutive_failures"] = state.get("consecutive_failures", 0) + 1
+        if not state.get("failure_notified", False):
+            safe_bark(
+                "HAX 监控失效",
+                f"GitHub Actions 暂时无法连接 Telegram，已记录失败次数：{state['consecutive_failures']}。错误：{e}",
+            )
+            state["failure_notified"] = True
+        save_state(state)
+        print(
+            "monitor failed but suppressed workflow failure:",
+            f"consecutive_failures={state['consecutive_failures']}",
+            f"error={e}",
+        )

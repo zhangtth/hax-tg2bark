@@ -17,7 +17,7 @@ def env_bool(name: str, default: bool = False) -> bool:
 
 def bark_notify(base: str, key: str, title: str, body: str, group: str) -> None:
     url = f"{base.rstrip('/')}/{key}"
-    payload = {"title": title, "body": body, "group": group}
+    payload = {"title": title, "body": body, "group": group, "level": "passive"}
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     request = urllib.request.Request(
         url,
