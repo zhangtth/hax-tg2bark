@@ -31,8 +31,6 @@ def recovery_notify_after():
 
 def bark(title, body, level="active"):
     payload = {"title": title, "body": body, "group": "hax", "level": level}
-    if level == "critical":
-        payload["volume"] = 8
     req = urllib.request.Request(
         f"https://api.day.app/{BARK_KEY}",
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
@@ -54,9 +52,9 @@ def safe_bark(title, body, level="active"):
 def classify(text):
     low = text.lower()
     if "will be removed" in low:
-        return "HAX VPS 续签提醒", "critical"
+        return "HAX VPS 续签提醒", "active"
     if "has been removed" in low:
-        return "HAX VPS 已被删除", "critical"
+        return "HAX VPS 已被删除", "active"
     if "is ready" in low:
         return "HAX VPS 已就绪", "active"
     return "HAX 通知", "active"
@@ -137,7 +135,7 @@ if __name__ == "__main__":
             state["failure_notified"] = safe_bark(
                 "HAX 监控失效",
                 f"GitHub Actions 暂时无法连接 Telegram，已记录失败次数：{state['consecutive_failures']}。错误：{e}",
-                "critical",
+                "active",
             )
         save_state(state)
         print(
