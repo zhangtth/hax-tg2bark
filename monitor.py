@@ -22,10 +22,12 @@ def recovery_notify_after():
 
 
 def bark(title, body, level="active"):
-    payload = {"title": title, "body": body, "group": "hax", "level": "passive"}
+    payload = {"title": title, "body": body, "group": "hax", "level": level}
+    if level == "critical":
+        payload["volume"] = 8
     req = urllib.request.Request(
         f"https://api.day.app/{BARK_KEY}",
-        data=json.dumps(payload).encode(),
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
         headers={"Content-Type": "application/json"},
     )
     with urllib.request.urlopen(req, timeout=10) as resp:
@@ -90,7 +92,10 @@ async def main():
 
     for m in reversed(msgs):
         title, level = classify(m.text)
-        safe_bark(title, m.text, level)
+        if not safe_bark(title, m.text, level):
+            state["last_id"] = last_id
+            save_state(state)
+            raise RuntimeError(f"Bark notification failed for Telegram message id {m.id}")
         last_id = max(last_id, m.id)
 
     state["last_id"] = last_id
@@ -107,11 +112,11 @@ if __name__ == "__main__":
         state = load_state()
         state["consecutive_failures"] = state.get("consecutive_failures", 0) + 1
         if not state.get("failure_notified", False):
-            safe_bark(
+            state["failure_notified"] = safe_bark(
                 "HAX 监控失效",
                 f"GitHub Actions 暂时无法连接 Telegram，已记录失败次数：{state['consecutive_failures']}。错误：{e}",
+                "critical",
             )
-            state["failure_notified"] = True
         save_state(state)
         print(
             "monitor failed but suppressed workflow failure:",
