@@ -14,6 +14,14 @@ BOT = "HaxTG_bot"
 STATE_FILE = "state.json"
 
 
+class TelegramMonitorError(Exception):
+    pass
+
+
+class BarkNotificationError(Exception):
+    pass
+
+
 def recovery_notify_after():
     try:
         return max(1, int(os.getenv("RECOVERY_NOTIFY_AFTER", "1")))
@@ -71,31 +79,45 @@ def save_state(state):
         json.dump(state, f)
 
 
+async def fetch_messages(last_id):
+    client = TelegramClient(StringSession(SESSION), API_ID, API_HASH)
+    try:
+        await client.connect()
+        if not await client.is_user_authorized():
+            raise TelegramMonitorError("Telegram session 已失效，需要重新登录生成 StringSession")
+        return [m async for m in client.iter_messages(BOT, min_id=last_id) if m.text]
+    except TelegramMonitorError:
+        raise
+    except Exception as exc:
+        raise TelegramMonitorError(f"Telegram 连接或读取失败：{exc}") from exc
+    finally:
+        try:
+            if client.is_connected():
+                await client.disconnect()
+        except Exception as exc:
+            print(f"Failed to disconnect Telegram client: {exc}")
+
+
 async def main():
     state = load_state()
     last_id = state["last_id"]
 
-    client = TelegramClient(StringSession(SESSION), API_ID, API_HASH)
-    await client.connect()
-    if not await client.is_user_authorized():
-        await client.disconnect()
-        raise RuntimeError("Telegram session 已失效，需要重新登录生成 StringSession")
-    msgs = [m async for m in client.iter_messages(BOT, min_id=last_id) if m.text]
-    await client.disconnect()
+    msgs = await fetch_messages(last_id)
 
     previous_failures = state.get("consecutive_failures", 0)
     if previous_failures >= recovery_notify_after():
-        safe_bark(
+        if not safe_bark(
             "HAX 监控已恢复",
             f"GitHub Actions 连续失败 {previous_failures} 次后已恢复连接。",
-        )
+        ):
+            raise BarkNotificationError("Bark recovery notification failed")
 
     for m in reversed(msgs):
         title, level = classify(m.text)
         if not safe_bark(title, m.text, level):
             state["last_id"] = last_id
             save_state(state)
-            raise RuntimeError(f"Bark notification failed for Telegram message id {m.id}")
+            raise BarkNotificationError(f"Bark notification failed for Telegram message id {m.id}")
         last_id = max(last_id, m.id)
 
     state["last_id"] = last_id
@@ -108,7 +130,7 @@ async def main():
 if __name__ == "__main__":
     try:
         asyncio.run(main())
-    except Exception as e:
+    except TelegramMonitorError as e:
         state = load_state()
         state["consecutive_failures"] = state.get("consecutive_failures", 0) + 1
         if not state.get("failure_notified", False):
@@ -119,7 +141,9 @@ if __name__ == "__main__":
             )
         save_state(state)
         print(
-            "monitor failed but suppressed workflow failure:",
+            "telegram monitor failed but suppressed workflow failure:",
             f"consecutive_failures={state['consecutive_failures']}",
             f"error={e}",
         )
+    except BarkNotificationError as e:
+        print("bark notification failed; state preserved for retry:", e)
