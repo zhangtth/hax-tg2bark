@@ -23,10 +23,18 @@ class BarkNotificationError(Exception):
 
 
 def recovery_notify_after():
+    return env_positive_int("RECOVERY_NOTIFY_AFTER", 1)
+
+
+def telegram_timeout_seconds():
+    return env_positive_int("TELEGRAM_TIMEOUT_SECONDS", 90)
+
+
+def env_positive_int(name, default):
     try:
-        return max(1, int(os.getenv("RECOVERY_NOTIFY_AFTER", "1")))
+        return max(1, int(os.getenv(name, str(default))))
     except ValueError:
-        return 1
+        return default
 
 
 def bark(title, body, level="active"):
@@ -77,8 +85,16 @@ def save_state(state):
         json.dump(state, f)
 
 
-async def fetch_messages(last_id):
-    client = TelegramClient(StringSession(SESSION), API_ID, API_HASH)
+async def fetch_messages_once(last_id):
+    connect_timeout = min(10, telegram_timeout_seconds())
+    client = TelegramClient(
+        StringSession(SESSION),
+        API_ID,
+        API_HASH,
+        connection_retries=2,
+        retry_delay=1,
+        timeout=connect_timeout,
+    )
     try:
         await client.connect()
         if not await client.is_user_authorized():
@@ -94,6 +110,14 @@ async def fetch_messages(last_id):
                 await client.disconnect()
         except Exception as exc:
             print(f"Failed to disconnect Telegram client: {exc}")
+
+
+async def fetch_messages(last_id):
+    timeout = telegram_timeout_seconds()
+    try:
+        return await asyncio.wait_for(fetch_messages_once(last_id), timeout=timeout)
+    except TimeoutError as exc:
+        raise TelegramMonitorError(f"Telegram 连接或读取超时（>{timeout}s）") from exc
 
 
 async def main():
