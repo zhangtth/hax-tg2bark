@@ -22,8 +22,12 @@ class BarkNotificationError(Exception):
     pass
 
 
+def failure_notify_threshold():
+    return env_positive_int("FAILURE_NOTIFY_THRESHOLD", 3)
+
+
 def recovery_notify_after():
-    return env_positive_int("RECOVERY_NOTIFY_AFTER", 1)
+    return env_positive_int("RECOVERY_NOTIFY_AFTER", failure_notify_threshold())
 
 
 def telegram_timeout_seconds():
@@ -127,7 +131,8 @@ async def main():
     msgs = await fetch_messages(last_id)
 
     previous_failures = state.get("consecutive_failures", 0)
-    if previous_failures >= recovery_notify_after():
+    had_failure_notified = state.get("failure_notified", False)
+    if had_failure_notified or previous_failures >= recovery_notify_after():
         if not safe_bark(
             "HAX 监控已恢复",
             f"GitHub Actions 连续失败 {previous_failures} 次后已恢复连接。",
@@ -155,10 +160,11 @@ if __name__ == "__main__":
     except TelegramMonitorError as e:
         state = load_state()
         state["consecutive_failures"] = state.get("consecutive_failures", 0) + 1
-        if not state.get("failure_notified", False):
+        threshold = failure_notify_threshold()
+        if state["consecutive_failures"] >= threshold and not state.get("failure_notified", False):
             state["failure_notified"] = safe_bark(
                 "HAX 监控失效",
-                f"GitHub Actions 暂时无法连接 Telegram，已记录失败次数：{state['consecutive_failures']}。错误：{e}",
+                f"GitHub Actions 连续失败 {state['consecutive_failures']} 次，暂时无法连接 Telegram。错误：{e}",
                 "active",
             )
         save_state(state)
