@@ -1,7 +1,9 @@
 import asyncio
 import json
 import os
+import re
 import urllib.request
+from contextlib import asynccontextmanager
 
 from telethon import TelegramClient
 from telethon.sessions import StringSession
@@ -11,6 +13,9 @@ API_HASH = os.environ["TG_API_HASH"]
 SESSION = os.environ["TG_SESSION"]
 BARK_KEY = os.environ["BARK_KEY"]
 BOT = "HaxTG_bot"
+FORWARD_TO = os.getenv("TG_FORWARD_TO", "").strip().lstrip("@")
+if FORWARD_TO and (not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{4,31}", FORWARD_TO) or FORWARD_TO.lower() == BOT.lower()):
+    raise ValueError("TG_FORWARD_TO must be a different Telegram username")
 STATE_FILE = "state.json"
 
 
@@ -19,6 +24,10 @@ class TelegramMonitorError(Exception):
 
 
 class BarkNotificationError(Exception):
+    pass
+
+
+class TelegramForwardError(Exception):
     pass
 
 
@@ -89,7 +98,8 @@ def save_state(state):
         json.dump(state, f)
 
 
-async def fetch_messages_once(last_id):
+@asynccontextmanager
+async def telegram_client():
     connect_timeout = min(10, telegram_timeout_seconds())
     client = TelegramClient(
         StringSession(SESSION),
@@ -103,7 +113,7 @@ async def fetch_messages_once(last_id):
         await client.connect()
         if not await client.is_user_authorized():
             raise TelegramMonitorError("Telegram session 已失效，需要重新登录生成 StringSession")
-        return [m async for m in client.iter_messages(BOT, min_id=last_id) if m.text]
+        yield client
     except TelegramMonitorError:
         raise
     except Exception as exc:
@@ -114,6 +124,30 @@ async def fetch_messages_once(last_id):
                 await client.disconnect()
         except Exception as exc:
             print(f"Failed to disconnect Telegram client: {exc}")
+
+
+async def fetch_messages_once(last_id):
+    async with telegram_client() as client:
+        return [m async for m in client.iter_messages(BOT, min_id=last_id) if m.text]
+
+
+async def forward_messages_once(msgs, state):
+    async with telegram_client() as client:
+        target = await client.get_entity(FORWARD_TO)
+        if not getattr(target, "bot", False):
+            raise TelegramForwardError("Forward destination is not a Telegram bot")
+        count = 0
+        for m in sorted(msgs, key=lambda m: m.id):
+            if m.id <= state["forward_last_id"]:
+                continue
+            if not m.out:
+                result = await client.forward_messages(target, m.id, from_peer=BOT)
+                if not result:
+                    raise TelegramForwardError("Telegram returned no forwarded message")
+                count += 1
+            state["forward_last_id"] = m.id
+            save_state(state)
+        print(f"telegram forward: target=@{FORWARD_TO}, sent={count}")
 
 
 async def fetch_messages(last_id):
@@ -128,7 +162,18 @@ async def main():
     state = load_state()
     last_id = state["last_id"]
 
-    msgs = await fetch_messages(last_id)
+    if FORWARD_TO:
+        state.setdefault("forward_last_id", last_id)
+        save_state(state)
+    msgs = await fetch_messages(min(last_id, state["forward_last_id"]) if FORWARD_TO else last_id)
+
+    forward_error = None
+    if FORWARD_TO:
+        try:
+            await asyncio.wait_for(forward_messages_once(msgs, state), timeout=telegram_timeout_seconds())
+        except Exception as exc:
+            forward_error = exc
+            print(f"Telegram forwarding failed; progress preserved for retry: {type(exc).__name__}")
 
     previous_failures = state.get("consecutive_failures", 0)
     had_failure_notified = state.get("failure_notified", False)
@@ -140,6 +185,8 @@ async def main():
             raise BarkNotificationError("Bark recovery notification failed")
 
     for m in reversed(msgs):
+        if m.id <= last_id:
+            continue
         title, level = classify(m.text)
         if not safe_bark(title, m.text, level):
             state["last_id"] = last_id
@@ -152,6 +199,8 @@ async def main():
     state["failure_notified"] = False
     save_state(state)
     print(f"done: {len(msgs)} new message(s), last_id={last_id}")
+    if forward_error is not None:
+        raise TelegramForwardError("Telegram forwarding failed; Bark processing completed") from forward_error
 
 
 if __name__ == "__main__":

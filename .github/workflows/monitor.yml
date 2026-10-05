@@ -13,6 +13,7 @@ permissions:
 jobs:
   monitor:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
@@ -22,14 +23,18 @@ jobs:
 
       - run: pip install -q telethon
 
+      - run: python -m unittest -q
+
       - run: python monitor.py
         env:
           TG_API_ID: ${{ secrets.TG_API_ID }}
           TG_API_HASH: ${{ secrets.TG_API_HASH }}
           TG_SESSION: ${{ secrets.TG_SESSION }}
           BARK_KEY: ${{ secrets.BARK_KEY }}
+          TG_FORWARD_TO: haxeu_musebot
 
       - name: commit state
+        if: ${{ always() }}
         run: |
           if ! git diff --quiet state.json; then
             git config user.name "github-actions[bot]"
