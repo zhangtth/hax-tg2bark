@@ -104,6 +104,29 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.client.get_entity.assert_not_awaited()
         self.assertEqual(bark.call_count, 1)
 
+    async def test_manual_forward_only_latest_without_state_or_bark(self):
+        async def history(*args, **kwargs):
+            for m in [message(13, out=True), message(12), message(11)]:
+                yield m
+
+        self.client.iter_messages = history
+        with patch.object(monitor, "save_state") as save, patch.object(monitor, "safe_bark") as bark:
+            await monitor.test_forward_latest()
+        self.client.forward_messages.assert_awaited_once()
+        self.assertEqual(self.client.forward_messages.await_args.args[1], 12)
+        save.assert_not_called()
+        bark.assert_not_called()
+
+    async def test_manual_empty_history_sends_nothing(self):
+        async def history(*args, **kwargs):
+            for m in []:
+                yield m
+
+        self.client.iter_messages = history
+        with self.assertRaises(monitor.TelegramForwardError):
+            await monitor.test_forward_latest()
+        self.client.forward_messages.assert_not_awaited()
+
 
 if __name__ == "__main__":
     unittest.main()

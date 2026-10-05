@@ -131,7 +131,7 @@ async def fetch_messages_once(last_id):
         return [m async for m in client.iter_messages(BOT, min_id=last_id) if m.text]
 
 
-async def forward_messages_once(msgs, state):
+async def forward_messages_once(msgs, state, persist=True):
     async with telegram_client() as client:
         target = await client.get_entity(FORWARD_TO)
         if not getattr(target, "bot", False):
@@ -144,10 +144,22 @@ async def forward_messages_once(msgs, state):
                 result = await client.forward_messages(target, m.id, from_peer=BOT)
                 if not result:
                     raise TelegramForwardError("Telegram returned no forwarded message")
+                print(f"forward accepted: source_id={m.id}, destination_id={result.id}")
                 count += 1
             state["forward_last_id"] = m.id
-            save_state(state)
+            if persist:
+                save_state(state)
         print(f"telegram forward: target=@{FORWARD_TO}, sent={count}")
+
+
+async def test_forward_latest():
+    if not FORWARD_TO:
+        raise TelegramForwardError("TG_FORWARD_TO is required for a forwarding test")
+    async with telegram_client() as client:
+        latest = await anext((m async for m in client.iter_messages(BOT, limit=20) if m.text and not m.out), None)
+    if latest is None:
+        raise TelegramForwardError("No incoming text notification found in the latest 20 messages")
+    await forward_messages_once([latest], {"forward_last_id": 0}, persist=False)
 
 
 async def fetch_messages(last_id):
@@ -204,6 +216,9 @@ async def main():
 
 
 if __name__ == "__main__":
+    if os.getenv("TEST_FORWARD_LATEST", "false").lower() == "true":
+        asyncio.run(asyncio.wait_for(test_forward_latest(), timeout=telegram_timeout_seconds()))
+        raise SystemExit(0)
     try:
         asyncio.run(main())
     except TelegramMonitorError as e:

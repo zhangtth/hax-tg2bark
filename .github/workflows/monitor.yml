@@ -4,6 +4,11 @@ on:
   schedule:
     - cron: "*/15 * * * *"
   workflow_dispatch:
+    inputs:
+      test_forward_latest:
+        description: Forward one latest incoming Hax notification without Bark or state changes
+        type: boolean
+        default: false
 
 concurrency: hax-monitor
 
@@ -32,6 +37,7 @@ jobs:
           TG_SESSION: ${{ secrets.TG_SESSION }}
           BARK_KEY: ${{ secrets.BARK_KEY }}
           TG_FORWARD_TO: haxeu_musebot
+          TEST_FORWARD_LATEST: ${{ inputs.test_forward_latest || false }}
 
       - name: commit state
         if: ${{ always() }}
