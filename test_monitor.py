@@ -19,6 +19,9 @@ def message(mid, out=False):
 
 class DeliveryTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
+        self.env_patch = patch.dict(os.environ, {'TEST_BARK': 'false', 'INITIALIZE_LATEST': 'false'})
+        self.env_patch.start()
+        self.addCleanup(self.env_patch.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.state_patch = patch.object(monitor, "STATE_FILE", str(Path(self.tmp.name) / "state.json"))
