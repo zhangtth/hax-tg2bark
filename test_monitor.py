@@ -29,7 +29,7 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self.target_patch.stop)
         self.client = SimpleNamespace(
             get_entity=AsyncMock(return_value=SimpleNamespace(bot=True)),
-            forward_messages=AsyncMock(return_value=SimpleNamespace(id=999)),
+            send_message=AsyncMock(return_value=SimpleNamespace(id=999)),
         )
 
         @asynccontextmanager
@@ -52,13 +52,14 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
         fetch, bark = await self.run_main({"last_id": 10}, [])
         fetch.assert_awaited_once_with(10)
         self.client.get_entity.assert_awaited_once_with("haxeu_musebot")
-        self.client.forward_messages.assert_not_awaited()
+        self.client.send_message.assert_not_awaited()
         self.assertEqual(monitor.load_state()["forward_last_id"], 10)
         bark.assert_not_called()
 
     async def test_new_messages_both_channels_in_order(self):
         _, bark = await self.run_main({"last_id": 10}, [message(12), message(11)])
-        self.assertEqual([c.args[1] for c in self.client.forward_messages.await_args_list], [11, 12])
+        self.assertEqual([c.args[1] for c in self.client.send_message.await_args_list],
+                         ['【Hax 通知｜hax-eu】\nnotice 11', '【Hax 通知｜hax-eu】\nnotice 12'])
         self.assertEqual(bark.call_count, 2)
         self.assertEqual(monitor.load_state()["forward_last_id"], 12)
         self.assertEqual(monitor.load_state()["last_id"], 12)
@@ -67,10 +68,10 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
         fetch, bark = await self.run_main({"last_id": 12, "forward_last_id": 10}, [message(12), message(11)])
         fetch.assert_awaited_once_with(10)
         bark.assert_not_called()
-        self.assertEqual(self.client.forward_messages.await_count, 2)
+        self.assertEqual(self.client.send_message.await_count, 2)
 
     async def test_forward_failure_preserves_partial_progress_and_bark(self):
-        self.client.forward_messages.side_effect = [SimpleNamespace(id=999), RuntimeError("test")]
+        self.client.send_message.side_effect = [SimpleNamespace(id=999), RuntimeError("test")]
         with self.assertRaises(monitor.TelegramForwardError):
             await self.run_main({"last_id": 10}, [message(12), message(11)])
         state = monitor.load_state()
@@ -88,14 +89,14 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_outgoing_commands_not_forwarded(self):
         await self.run_main({"last_id": 10}, [message(11, out=True)])
-        self.client.forward_messages.assert_not_awaited()
+        self.client.send_message.assert_not_awaited()
         self.assertEqual(monitor.load_state()["forward_last_id"], 11)
 
     async def test_non_bot_rejected_without_blocking_bark(self):
         self.client.get_entity.return_value = SimpleNamespace(bot=False)
         with self.assertRaises(monitor.TelegramForwardError):
             await self.run_main({"last_id": 10}, [message(11)])
-        self.client.forward_messages.assert_not_awaited()
+        self.client.send_message.assert_not_awaited()
         self.assertEqual(monitor.load_state()["last_id"], 11)
 
     async def test_disabled_keeps_existing_behavior(self):
@@ -112,8 +113,8 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.client.iter_messages = history
         with patch.object(monitor, "save_state") as save, patch.object(monitor, "safe_bark") as bark:
             await monitor.test_forward_latest()
-        self.client.forward_messages.assert_awaited_once()
-        self.assertEqual(self.client.forward_messages.await_args.args[1], 12)
+        self.client.send_message.assert_awaited_once()
+        self.assertEqual(self.client.send_message.await_args.args[1], '【Hax 通知｜hax-eu】\nnotice 12')
         save.assert_not_called()
         bark.assert_not_called()
 
@@ -125,7 +126,54 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.client.iter_messages = history
         with self.assertRaises(monitor.TelegramForwardError):
             await monitor.test_forward_latest()
-        self.client.forward_messages.assert_not_awaited()
+        self.client.send_message.assert_not_awaited()
+
+    async def test_second_account_label(self):
+        with patch.object(monitor, 'ACCOUNT_LABEL', 'hax-us3'):
+            await self.run_main({'last_id': 10}, [message(11)])
+        self.assertEqual(self.client.send_message.await_args.args[1], '【Hax 通知｜hax-us3】\nnotice 11')
+
+    async def test_initialize_skips_history(self):
+        async def history(*args, **kwargs):
+            yield message(99)
+        self.client.iter_messages = history
+        with patch.dict(os.environ, {'INITIALIZE_LATEST': 'true'}), patch.object(
+            monitor, 'fetch_messages', AsyncMock(return_value=[])
+        ) as fetch:
+            await monitor.main()
+        fetch.assert_awaited_once_with(99)
+        self.assertEqual(monitor.load_state()['forward_last_id'], 99)
+        self.client.send_message.assert_not_awaited()
+
+    async def test_existing_progress_not_reinitialized(self):
+        with patch.dict(os.environ, {'INITIALIZE_LATEST': 'true'}), patch.object(
+            monitor, 'initialize_account', AsyncMock()
+        ) as init:
+            await self.run_main({'last_id': 10}, [])
+        init.assert_not_awaited()
+
+    async def test_bad_state_fails_closed(self):
+        Path(monitor.STATE_FILE).write_text('bad json')
+        with self.assertRaises(ValueError):
+            await monitor.main()
+
+    async def test_long_message_preserved(self):
+        msg = message(11)
+        msg.text = 'x' * 4096
+        await self.run_main({'last_id': 10}, [msg])
+        chunks = [call.args[1] for call in self.client.send_message.await_args_list]
+        self.assertEqual(''.join(chunks), '【Hax 通知｜hax-eu】\n' + msg.text)
+        self.assertTrue(all(len(chunk) <= 4096 for chunk in chunks))
+
+    async def test_bark_label(self):
+        import json
+        from unittest.mock import MagicMock
+        with patch.object(monitor.urllib.request, 'urlopen', MagicMock()) as request, patch.object(
+            monitor, 'ACCOUNT_LABEL', 'hax-us3'
+        ):
+            monitor.bark('续签提醒', 'body')
+        payload = json.loads(request.call_args.args[0].data)
+        self.assertEqual(payload['title'], '[hax-us3] 续签提醒')
 
 
 if __name__ == "__main__":

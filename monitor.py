@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 
 from telethon import TelegramClient
 from telethon.sessions import StringSession
+from telethon.utils import split_text
 
 API_ID = int(os.environ["TG_API_ID"])
 API_HASH = os.environ["TG_API_HASH"]
@@ -16,7 +17,10 @@ BOT = "HaxTG_bot"
 FORWARD_TO = os.getenv("TG_FORWARD_TO", "").strip().lstrip("@")
 if FORWARD_TO and (not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{4,31}", FORWARD_TO) or FORWARD_TO.lower() == BOT.lower()):
     raise ValueError("TG_FORWARD_TO must be a different Telegram username")
-STATE_FILE = "state.json"
+ACCOUNT_LABEL = os.getenv("ACCOUNT_LABEL", "hax-eu")
+if ACCOUNT_LABEL not in ("hax-eu", "hax-us3"):
+    raise ValueError("Unknown account label")
+STATE_FILE = os.getenv("STATE_FILE", "state.json")
 
 
 class TelegramMonitorError(Exception):
@@ -51,7 +55,7 @@ def env_positive_int(name, default):
 
 
 def bark(title, body, level="active"):
-    payload = {"title": title, "body": body, "group": "hax", "level": level}
+    payload = {"title": f"[{ACCOUNT_LABEL}] {title}", "body": body, "group": "hax", "level": level}
     req = urllib.request.Request(
         f"https://api.day.app/{BARK_KEY}",
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
@@ -85,7 +89,7 @@ def load_state():
     try:
         with open(STATE_FILE) as f:
             state = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
+    except FileNotFoundError:
         state = {}
     state.setdefault("last_id", 0)
     state.setdefault("consecutive_failures", 0)
@@ -94,8 +98,9 @@ def load_state():
 
 
 def save_state(state):
-    with open(STATE_FILE, "w") as f:
+    with open(STATE_FILE + ".tmp", "w") as f:
         json.dump(state, f)
+    os.replace(STATE_FILE + ".tmp", STATE_FILE)
 
 
 @asynccontextmanager
@@ -141,15 +146,16 @@ async def forward_messages_once(msgs, state, persist=True):
             if m.id <= state["forward_last_id"]:
                 continue
             if not m.out:
-                result = await client.forward_messages(target, m.id, from_peer=BOT)
-                if not result:
-                    raise TelegramForwardError("Telegram returned no forwarded message")
+                for text, entities in split_text(f"【Hax 通知｜{ACCOUNT_LABEL}】\n{m.text}", []):
+                    result = await client.send_message(target, text, formatting_entities=entities, parse_mode=None, link_preview=False)
+                    if not result:
+                        raise TelegramForwardError("Telegram returned no sent message")
                 print(f"forward accepted: source_id={m.id}, destination_id={result.id}")
                 count += 1
             state["forward_last_id"] = m.id
             if persist:
                 save_state(state)
-        print(f"telegram forward: target=@{FORWARD_TO}, sent={count}")
+        print(f"telegram forward: account={ACCOUNT_LABEL}, target=@{FORWARD_TO}, sent={count}")
 
 
 async def test_forward_latest():
@@ -160,6 +166,11 @@ async def test_forward_latest():
     if latest is None:
         raise TelegramForwardError("No incoming text notification found in the latest 20 messages")
     await forward_messages_once([latest], {"forward_last_id": 0}, persist=False)
+    if os.getenv("TEST_BARK", "false").lower() == "true":
+        title, level = classify(latest.text)
+        if not safe_bark(title, latest.text, level):
+            raise BarkNotificationError("Bark test failed")
+        print(f"bark test accepted: account={ACCOUNT_LABEL}")
 
 
 async def fetch_messages(last_id):
@@ -170,7 +181,18 @@ async def fetch_messages(last_id):
         raise TelegramMonitorError(f"Telegram 连接或读取超时（>{timeout}s）") from exc
 
 
+async def initialize_account():
+    async with telegram_client() as client:
+        latest = await anext(client.iter_messages(BOT, limit=1), None)
+    last_id = latest.id if latest else 0
+    save_state({"last_id": last_id, "forward_last_id": last_id,
+                "consecutive_failures": 0, "failure_notified": False})
+    print(f"initialized account={ACCOUNT_LABEL}, historical messages skipped")
+
+
 async def main():
+    if os.getenv("INITIALIZE_LATEST", "false").lower() == "true" and not os.path.exists(STATE_FILE):
+        await asyncio.wait_for(initialize_account(), timeout=telegram_timeout_seconds())
     state = load_state()
     last_id = state["last_id"]
 
@@ -199,6 +221,9 @@ async def main():
     for m in reversed(msgs):
         if m.id <= last_id:
             continue
+        if m.out:
+            last_id = max(last_id, m.id)
+            continue
         title, level = classify(m.text)
         if not safe_bark(title, m.text, level):
             state["last_id"] = last_id
@@ -222,6 +247,8 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except TelegramMonitorError as e:
+        if os.getenv("INITIALIZE_LATEST", "false").lower() == "true" and not os.path.exists(STATE_FILE):
+            raise
         state = load_state()
         state["consecutive_failures"] = state.get("consecutive_failures", 0) + 1
         threshold = failure_notify_threshold()
